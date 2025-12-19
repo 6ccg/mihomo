@@ -193,13 +193,12 @@ func localPrefixesFromTUN(tun *minitunnel.TUN) ([]netip.Prefix, error) {
 		return nil, fmt.Errorf("openvpn: invalid local ip %q", ipStr)
 	}
 	mask := tun.NetMask()
-	ones, bits := mask.Size()
-	if ones == 0 && bits == 0 {
-		return nil, errors.New("openvpn: missing netmask")
-	}
 	if ip4 := ip.To4(); ip4 != nil {
-		if bits != 32 {
-			return nil, fmt.Errorf("openvpn: unexpected ipv4 mask size %d", bits)
+		ones := 32
+		if mask != nil {
+			if o, b := mask.Size(); b == 32 {
+				ones = o
+			}
 		}
 		var b [4]byte
 		copy(b[:], ip4)
@@ -209,8 +208,11 @@ func localPrefixesFromTUN(tun *minitunnel.TUN) ([]netip.Prefix, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("openvpn: unsupported ip %q", ipStr)
 	}
-	if bits != 128 {
-		return nil, fmt.Errorf("openvpn: unexpected ipv6 mask size %d", bits)
+	ones := 128
+	if mask != nil {
+		if o, b := mask.Size(); b == 128 {
+			ones = o
+		}
 	}
 	var b [16]byte
 	copy(b[:], ip)
