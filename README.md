@@ -71,6 +71,8 @@ go build -tags with_gvisor
 
 OpenVPN outbound uses the minivpn client and requires the gVisor build tag.
 
+Details: [docs/openvpn.md](docs/openvpn.md)
+
 Build:
 
 ```shell

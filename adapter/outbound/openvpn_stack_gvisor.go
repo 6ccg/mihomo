@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/metacubex/gvisor/pkg/buffer"
 	"github.com/metacubex/gvisor/pkg/tcpip"
+	"github.com/metacubex/gvisor/pkg/tcpip/checksum"
 	"github.com/metacubex/gvisor/pkg/tcpip/adapters/gonet"
 	"github.com/metacubex/gvisor/pkg/tcpip/header"
 	"github.com/metacubex/gvisor/pkg/tcpip/network/ipv4"
@@ -33,6 +35,28 @@ import (
 )
 
 const defaultOVPNNIC tcpip.NICID = 1
+
+var (
+	openvpnPacketLogAll   bool
+	openvpnPacketLogFirst uint64 = 5
+	openvpnPacketLogEvery uint64 = 100
+	openvpnPacketLogStats bool
+)
+
+func init() {
+	openvpnPacketLogAll = os.Getenv("MIHOMO_OPENVPN_LOG_ALL") == "1"
+	openvpnPacketLogStats = os.Getenv("MIHOMO_OPENVPN_LOG_STATS") == "1"
+	if v := os.Getenv("MIHOMO_OPENVPN_LOG_FIRST"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			openvpnPacketLogFirst = n
+		}
+	}
+	if v := os.Getenv("MIHOMO_OPENVPN_LOG_EVERY"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			openvpnPacketLogEvery = n
+		}
+	}
+}
 
 type openvpnStackDevice struct {
 	stack      *stack.Stack
@@ -88,8 +112,6 @@ func newOpenVPNStackDevice(tun *minitunnel.TUN, localAddresses []netip.Prefix, m
 		{Destination: header.IPv4EmptySubnet, NIC: defaultOVPNNIC},
 		{Destination: header.IPv6EmptySubnet, NIC: defaultOVPNNIC},
 	})
-	ipStack.SetSpoofing(defaultOVPNNIC, true)
-	ipStack.SetPromiscuousMode(defaultOVPNNIC, true)
 
 	bufSize := 20 * 1024
 	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPReceiveBufferSizeRangeOption{
@@ -182,6 +204,9 @@ func (d *openvpnStackDevice) readLoop() {
 			if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
 				return
 			}
+			if mihomolog.Level() == mihomolog.DEBUG {
+				mihomolog.Debugln("[OpenVPN] tun.Read error: %v", err)
+			}
 			continue
 		}
 		if n == 0 {
@@ -189,7 +214,8 @@ func (d *openvpnStackDevice) readLoop() {
 		}
 		data := make([]byte, n)
 		copy(data, buf[:n])
-		d.logPacket("tun->stack", data, atomic.AddUint64(&d.inPackets, 1))
+		inCount := atomic.AddUint64(&d.inPackets, 1)
+		d.logPacket("tun->stack", data, inCount)
 		var networkProtocol tcpip.NetworkProtocolNumber
 		switch header.IPVersion(data) {
 		case header.IPv4Version:
@@ -204,6 +230,7 @@ func (d *openvpnStackDevice) readLoop() {
 		})
 		d.dispatcher.DeliverNetworkPacket(networkProtocol, packetBuffer)
 		packetBuffer.DecRef()
+		d.logStats("tun->stack", inCount)
 	}
 }
 
@@ -226,13 +253,18 @@ func (d *openvpnStackDevice) writeLoop() {
 				offset += copy(payload[offset:], slice)
 			}
 			packetBuffer.DecRef()
-			d.logPacket("stack->tun", payload, atomic.AddUint64(&d.outPackets, 1))
+			outCount := atomic.AddUint64(&d.outPackets, 1)
+			d.logPacket("stack->tun", payload, outCount)
 			_, err := d.tun.Write(payload)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
 					return
 				}
+				if mihomolog.Level() == mihomolog.DEBUG {
+					mihomolog.Debugln("[OpenVPN] tun.Write error: %v", err)
+				}
 			}
+			d.logStats("stack->tun", outCount)
 		}
 	}
 }
@@ -306,27 +338,166 @@ func (d *openvpnStackDevice) logPacket(direction string, payload []byte, count u
 	if mihomolog.Level() != mihomolog.DEBUG {
 		return
 	}
-	if count > 5 && count%100 != 0 {
-		return
+	if !openvpnPacketLogAll {
+		if count > openvpnPacketLogFirst {
+			if openvpnPacketLogEvery == 0 || count%openvpnPacketLogEvery != 0 {
+				return
+			}
+		}
 	}
-	var src, dst netip.Addr
-	proto := 0
+
+	var (
+		src, dst     netip.Addr
+		proto        = 0
+		transportOff = 0
+		ipSummary    string
+	)
+
 	switch header.IPVersion(payload) {
 	case header.IPv4Version:
 		ip4 := header.IPv4(payload)
+		transportOff = int(ip4.HeaderLength())
 		src = addrFromAddress(ip4.SourceAddress())
 		dst = addrFromAddress(ip4.DestinationAddress())
 		proto = int(ip4.Protocol())
+
+		flags := ip4.Flags()
+		flagsSummary := ""
+		if flags&header.IPv4FlagDontFragment != 0 {
+			flagsSummary = "DF"
+		}
+		if flags&header.IPv4FlagMoreFragments != 0 {
+			if flagsSummary != "" {
+				flagsSummary += "|"
+			}
+			flagsSummary += "MF"
+		}
+		if flagsSummary == "" {
+			flagsSummary = "0"
+		}
+
+		ipSummary = "ipv4 ttl=" + strconv.Itoa(int(ip4.TTL())) +
+			" ihl=" + strconv.Itoa(int(ip4.HeaderLength())) +
+			" totlen=" + strconv.Itoa(int(ip4.TotalLength())) +
+			" id=" + strconv.Itoa(int(ip4.ID())) +
+			" flags=" + flagsSummary + "(" + strconv.Itoa(int(flags)) + ")" +
+			" fragOff=" + strconv.Itoa(int(ip4.FragmentOffset()))
 	case header.IPv6Version:
 		ip6 := header.IPv6(payload)
+		transportOff = header.IPv6MinimumSize
 		src = addrFromAddress(ip6.SourceAddress())
 		dst = addrFromAddress(ip6.DestinationAddress())
 		proto = int(ip6.NextHeader())
+		ipSummary = "ipv6 hlim=" + strconv.Itoa(int(ip6.HopLimit()))
 	default:
 		mihomolog.Debugln("[OpenVPN] %s packet #%d len=%d unknown ip version", direction, count, len(payload))
 		return
 	}
-	mihomolog.Debugln("[OpenVPN] %s packet #%d len=%d proto=%d src=%s dst=%s", direction, count, len(payload), proto, src, dst)
+
+	extra := ""
+	switch proto {
+	case int(header.TCPProtocolNumber):
+		if transportOff+header.TCPMinimumSize <= len(payload) {
+			tcpHdr := header.TCP(payload[transportOff:])
+			tcpHeaderLen := int(tcpHdr.DataOffset())
+			if tcpHeaderLen >= header.TCPMinimumSize && transportOff+tcpHeaderLen <= len(payload) {
+				tcpPayload := payload[transportOff+tcpHeaderLen:]
+
+				var (
+					ipChecksumOK  = true
+					tcpChecksumOK = true
+				)
+
+				switch header.IPVersion(payload) {
+				case header.IPv4Version:
+					ip4 := header.IPv4(payload)
+					if int(ip4.HeaderLength()) <= len(payload) {
+						ipChecksumOK = ip4.IsChecksumValid()
+					}
+					payloadChecksum := checksum.Checksum(tcpPayload, 0)
+					tcpChecksumOK = tcpHdr.IsChecksumValid(ip4.SourceAddress(), ip4.DestinationAddress(), payloadChecksum, uint16(len(tcpPayload)))
+				case header.IPv6Version:
+					ip6 := header.IPv6(payload)
+					payloadChecksum := checksum.Checksum(tcpPayload, 0)
+					tcpChecksumOK = tcpHdr.IsChecksumValid(ip6.SourceAddress(), ip6.DestinationAddress(), payloadChecksum, uint16(len(tcpPayload)))
+				}
+
+				extra = " tcp " +
+					net.JoinHostPort(src.String(), strconv.Itoa(int(tcpHdr.SourcePort()))) + " -> " +
+					net.JoinHostPort(dst.String(), strconv.Itoa(int(tcpHdr.DestinationPort()))) +
+					" flags=" + tcpHdr.Flags().String() +
+					" seq=" + strconv.FormatUint(uint64(tcpHdr.SequenceNumber()), 10) +
+					" ack=" + strconv.FormatUint(uint64(tcpHdr.AckNumber()), 10) +
+					" win=" + strconv.Itoa(int(tcpHdr.WindowSize())) +
+					" ipxsum=" + strconv.FormatBool(ipChecksumOK) +
+					" tcpxsum=" + strconv.FormatBool(tcpChecksumOK)
+			}
+		}
+	case int(header.UDPProtocolNumber):
+		if transportOff+header.UDPMinimumSize <= len(payload) {
+			udpHdr := header.UDP(payload[transportOff:])
+			extra = " udp " +
+				net.JoinHostPort(src.String(), strconv.Itoa(int(udpHdr.SourcePort()))) + " -> " +
+				net.JoinHostPort(dst.String(), strconv.Itoa(int(udpHdr.DestinationPort())))
+		}
+	case int(header.ICMPv4ProtocolNumber):
+		if transportOff+header.ICMPv4MinimumSize <= len(payload) {
+			icmp4 := header.ICMPv4(payload[transportOff:])
+			extra = " icmp4 type=" + strconv.Itoa(int(icmp4.Type())) + " code=" + strconv.Itoa(int(icmp4.Code()))
+		}
+	case int(header.ICMPv6ProtocolNumber):
+		if transportOff+header.ICMPv6MinimumSize <= len(payload) {
+			icmp6 := header.ICMPv6(payload[transportOff:])
+			extra = " icmp6 type=" + strconv.Itoa(int(icmp6.Type())) + " code=" + strconv.Itoa(int(icmp6.Code()))
+		}
+	}
+
+	mihomolog.Debugln("[OpenVPN] %s packet #%d len=%d proto=%d %s src=%s dst=%s%s", direction, count, len(payload), proto, ipSummary, src, dst, extra)
+}
+
+func (d *openvpnStackDevice) logStats(direction string, count uint64) {
+	if mihomolog.Level() != mihomolog.DEBUG || !openvpnPacketLogStats || d.stack == nil {
+		return
+	}
+	if !openvpnPacketLogAll {
+		if count > openvpnPacketLogFirst {
+			if openvpnPacketLogEvery == 0 || count%openvpnPacketLogEvery != 0 {
+				return
+			}
+		}
+	}
+
+	stats := d.stack.Stats()
+
+	get := func(counter *tcpip.StatCounter) uint64 {
+		if counter == nil {
+			return 0
+		}
+		return counter.Value()
+	}
+
+	mihomolog.Debugln(
+		"[OpenVPN] %s packet #%d stats ip(rx=%d valid=%d delivered=%d invalidDst=%d invalidSrc=%d malformed=%d preDrop=%d inDrop=%d outDrop=%d) tcp(validRx=%d invalidRx=%d sent=%d retrans=%d rstSent=%d rstRecv=%d fails=%d established=%d)",
+		direction,
+		count,
+		get(stats.IP.PacketsReceived),
+		get(stats.IP.ValidPacketsReceived),
+		get(stats.IP.PacketsDelivered),
+		get(stats.IP.InvalidDestinationAddressesReceived),
+		get(stats.IP.InvalidSourceAddressesReceived),
+		get(stats.IP.MalformedPacketsReceived),
+		get(stats.IP.IPTablesPreroutingDropped),
+		get(stats.IP.IPTablesInputDropped),
+		get(stats.IP.IPTablesOutputDropped),
+		get(stats.TCP.ValidSegmentsReceived),
+		get(stats.TCP.InvalidSegmentsReceived),
+		get(stats.TCP.SegmentsSent),
+		get(stats.TCP.Retransmits),
+		get(stats.TCP.ResetsSent),
+		get(stats.TCP.ResetsReceived),
+		get(stats.TCP.FailedConnectionAttempts),
+		get(stats.TCP.CurrentEstablished),
+	)
 }
 
 var _ stack.LinkEndpoint = (*openvpnEndpoint)(nil)
