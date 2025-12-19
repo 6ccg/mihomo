@@ -1,0 +1,4 @@
+[submodule "third_party/minivpn"]
+	path = third_party/minivpn
+	url = https://github.com/6ccg/minivpn.git
+	branch = main

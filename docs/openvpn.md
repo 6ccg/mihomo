@@ -7,6 +7,7 @@
 前置：
 - 需要 `with_gvisor` 构建标签（OpenVPN outbound 依赖 gVisor netstack）。
 - `config:` 路径会按 mihomo HomeDir（`-d` / `CLASH_HOME_DIR`）进行相对解析，并受 safe-path 校验影响。
+- 如果你从源码构建：先初始化子模块（本 fork 使用 `third_party/minivpn` 固定依赖版本）：`git submodule update --init --recursive`
 
 验证配置（不建立 VPN 连接）：
 

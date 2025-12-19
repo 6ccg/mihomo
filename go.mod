@@ -118,4 +118,4 @@ require (
 	github.com/refraction-networking/utls v1.3.1 // indirect
 )
 
-replace github.com/ooni/minivpn => ../minivpn
+replace github.com/ooni/minivpn => ./third_party/minivpn
