@@ -87,15 +87,15 @@ require (
 	github.com/josharian/native v1.1.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
 	github.com/klauspost/reedsolomon v1.12.3 // indirect
-	github.com/kr/text v0.2.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mdlayher/socket v0.4.1 // indirect
 	github.com/metacubex/ascon v0.1.0 // indirect
-	github.com/metacubex/gvisor v0.0.0-20250919004547-6122b699a301 // indirect
+	github.com/metacubex/gvisor v0.0.0-20250919004547-6122b699a301
 	github.com/metacubex/nftables v0.0.0-20250503052935-30a69ab87793 // indirect
 	github.com/metacubex/yamux v0.0.0-20250918083631-dd5f17c0be49 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
+	github.com/ooni/minivpn v0.0.0
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/quic-go/qpack v0.4.0 // indirect
@@ -111,3 +111,11 @@ require (
 	golang.org/x/time v0.7.0 // indirect
 	golang.org/x/tools v0.24.0 // indirect
 )
+
+require (
+	github.com/apex/log v1.9.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/refraction-networking/utls v1.3.1 // indirect
+)
+
+replace github.com/ooni/minivpn => ../minivpn

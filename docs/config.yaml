@@ -960,6 +960,15 @@ proxies: # socks5
     #   j3: <t><b 0xf6ab><c><r 10>                        # AmneziaWG v1.5 only (removed in v2)
     #   itime: 60                                         # AmneziaWG v1.5 only (removed in v2)
 
+  # openvpn
+  - name: "ovpn"
+    type: openvpn
+    config: vpn.ovpn
+    # username: user
+    # password: pass
+    # timeout: 60
+    # dialer-proxy: "ss1"
+
   # tuic
   - name: tuic
     server: www.example.com
@@ -1740,4 +1749,3 @@ listeners:
 #  alpn:
 #    - h3
 #  max-udp-relay-packet-size: 1500
-
