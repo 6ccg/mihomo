@@ -67,6 +67,39 @@ Build with gvisor tun stack:
 go build -tags with_gvisor
 ```
 
+### OpenVPN (minivpn)
+
+OpenVPN outbound uses the minivpn client and requires the gVisor build tag.
+
+Build:
+
+```shell
+go build -tags with_gvisor
+```
+
+Config example:
+
+```yaml
+proxies:
+  - name: ovpn
+    type: openvpn
+    config: vpn.ovpn
+    # username: user
+    # password: pass
+    # timeout: 60
+    # dialer-proxy: "ss1"
+```
+
+Notes:
+- The `config` path is resolved under mihomo home dir. Use `-d` or `CLASH_HOME_DIR` and place `vpn.ovpn` there, or set `SAFE_PATHS` to allow external paths.
+- minivpn supports a limited OpenVPN subset; unsupported options in `.ovpn` will be logged as warnings.
+
+Config validation:
+
+```shell
+go run -tags with_gvisor . -t -d /path/to/home -f /path/to/config.yaml
+```
+
 ### IPTABLES configuration
 
 Work on Linux OS which supported `iptables`
