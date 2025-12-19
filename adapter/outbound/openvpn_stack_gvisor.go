@@ -9,7 +9,10 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	mihomolog "github.com/metacubex/mihomo/log"
 
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
@@ -41,6 +44,8 @@ type openvpnStackDevice struct {
 	tun        *minitunnel.TUN
 	addr4      tcpip.Address
 	addr6      tcpip.Address
+	inPackets  uint64
+	outPackets uint64
 }
 
 func newOpenVPNStackDevice(tun *minitunnel.TUN, localAddresses []netip.Prefix, mtu uint32) (openvpnDevice, error) {
@@ -79,12 +84,30 @@ func newOpenVPNStackDevice(tun *minitunnel.TUN, localAddresses []netip.Prefix, m
 		}
 	}
 
+	ipStack.SetRouteTable([]tcpip.Route{
+		{Destination: header.IPv4EmptySubnet, NIC: defaultOVPNNIC},
+		{Destination: header.IPv6EmptySubnet, NIC: defaultOVPNNIC},
+	})
+	ipStack.SetSpoofing(defaultOVPNNIC, true)
+	ipStack.SetPromiscuousMode(defaultOVPNNIC, true)
+
+	bufSize := 20 * 1024
+	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPReceiveBufferSizeRangeOption{
+		Min:     1,
+		Default: bufSize,
+		Max:     bufSize,
+	})
+	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPSendBufferSizeRangeOption{
+		Min:     1,
+		Default: bufSize,
+		Max:     bufSize,
+	})
 	sOpt := tcpip.TCPSACKEnabled(true)
 	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sOpt)
+	mOpt := tcpip.TCPModerateReceiveBufferOption(true)
+	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &mOpt)
 	cOpt := tcpip.CongestionControlOption("cubic")
 	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &cOpt)
-	ipStack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: defaultOVPNNIC})
-	ipStack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: defaultOVPNNIC})
 
 	return device, nil
 }
@@ -166,6 +189,7 @@ func (d *openvpnStackDevice) readLoop() {
 		}
 		data := make([]byte, n)
 		copy(data, buf[:n])
+		d.logPacket("tun->stack", data, atomic.AddUint64(&d.inPackets, 1))
 		var networkProtocol tcpip.NetworkProtocolNumber
 		switch header.IPVersion(data) {
 		case header.IPv4Version:
@@ -202,6 +226,7 @@ func (d *openvpnStackDevice) writeLoop() {
 				offset += copy(payload[offset:], slice)
 			}
 			packetBuffer.DecRef()
+			d.logPacket("stack->tun", payload, atomic.AddUint64(&d.outPackets, 1))
 			_, err := d.tun.Write(payload)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
@@ -275,6 +300,33 @@ func addrFromAddress(address tcpip.Address) netip.Addr {
 		return netip.AddrFrom16(address.As16())
 	}
 	return netip.AddrFrom4(address.As4())
+}
+
+func (d *openvpnStackDevice) logPacket(direction string, payload []byte, count uint64) {
+	if mihomolog.Level() != mihomolog.DEBUG {
+		return
+	}
+	if count > 5 && count%100 != 0 {
+		return
+	}
+	var src, dst netip.Addr
+	proto := 0
+	switch header.IPVersion(payload) {
+	case header.IPv4Version:
+		ip4 := header.IPv4(payload)
+		src = addrFromAddress(ip4.SourceAddress())
+		dst = addrFromAddress(ip4.DestinationAddress())
+		proto = int(ip4.Protocol())
+	case header.IPv6Version:
+		ip6 := header.IPv6(payload)
+		src = addrFromAddress(ip6.SourceAddress())
+		dst = addrFromAddress(ip6.DestinationAddress())
+		proto = int(ip6.NextHeader())
+	default:
+		mihomolog.Debugln("[OpenVPN] %s packet #%d len=%d unknown ip version", direction, count, len(payload))
+		return
+	}
+	mihomolog.Debugln("[OpenVPN] %s packet #%d len=%d proto=%d src=%s dst=%s", direction, count, len(payload), proto, src, dst)
 }
 
 var _ stack.LinkEndpoint = (*openvpnEndpoint)(nil)
