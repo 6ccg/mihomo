@@ -108,10 +108,14 @@ func newOpenVPNStackDevice(tun *minitunnel.TUN, localAddresses []netip.Prefix, m
 		}
 	}
 
-	ipStack.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: defaultOVPNNIC},
-		{Destination: header.IPv6EmptySubnet, NIC: defaultOVPNNIC},
-	})
+	routes := make([]tcpip.Route, 0, 2)
+	if device.addr4.Len() != 0 {
+		routes = append(routes, tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: defaultOVPNNIC})
+	}
+	if device.addr6.Len() != 0 {
+		routes = append(routes, tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: defaultOVPNNIC})
+	}
+	ipStack.SetRouteTable(routes)
 
 	bufSize := 20 * 1024
 	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPReceiveBufferSizeRangeOption{

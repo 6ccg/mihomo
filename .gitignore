@@ -5,6 +5,7 @@
 *.so
 *.dylib
 bin/*
+mihomo
 
 # Test binary, build with `go test -c`
 *.test
@@ -24,5 +25,6 @@ vendor
 # test suite
 test/config/cache*
 /output
+.gocache/
 .vscode/
 .fleet/

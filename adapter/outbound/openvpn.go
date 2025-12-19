@@ -167,6 +167,28 @@ func (o *OpenVPN) init(ctx context.Context) error {
 		o.initErr = err
 		return o.initErr
 	}
+
+	has4, has6 := false, false
+	for _, prefix := range localPrefixes {
+		if prefix.Addr().Is4() {
+			has4 = true
+		} else if prefix.Addr().Is6() {
+			has6 = true
+		}
+	}
+	if has4 && !has6 {
+		// Clamp to IPv4 when the tunnel is effectively IPv4-only, unless user explicitly
+		// forces IPv6-only (in which case it's expected to be unreachable).
+		if o.prefer != C.IPv6Only {
+			o.prefer = C.IPv4Only
+		}
+	} else if has6 && !has4 {
+		// Clamp to IPv6 when the tunnel is effectively IPv6-only, unless user explicitly
+		// forces IPv4-only (in which case it's expected to be unreachable).
+		if o.prefer != C.IPv4Only {
+			o.prefer = C.IPv6Only
+		}
+	}
 	mtu := tun.MTU()
 	if mtu == 0 {
 		mtu = 1500
@@ -260,7 +282,20 @@ func (o *OpenVPN) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 
 func (o *OpenVPN) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	if !metadata.Resolved() && metadata.Host != "" {
-		ip, err := resolver.ResolveIP(ctx, metadata.Host)
+		var (
+			ip  netip.Addr
+			err error
+		)
+		switch o.prefer {
+		case C.IPv4Only:
+			ip, err = resolver.ResolveIPv4(ctx, metadata.Host)
+		case C.IPv6Only:
+			ip, err = resolver.ResolveIPv6(ctx, metadata.Host)
+		case C.IPv6Prefer:
+			ip, err = resolver.ResolveIPPrefer6(ctx, metadata.Host)
+		default:
+			ip, err = resolver.ResolveIP(ctx, metadata.Host)
+		}
 		if err != nil {
 			return fmt.Errorf("can't resolve ip: %w", err)
 		}
