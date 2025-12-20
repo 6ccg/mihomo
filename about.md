@@ -70,6 +70,19 @@ minivpn 已支持 OpenVPN 控制通道的 `tls-auth` / `tls-crypt` / `tls-crypt-
 - 支持文件路径或内联块（`<tls-auth>` / `<tls-crypt>` / `<tls-crypt-v2>`）；若使用路径，按 `.ovpn` 所在目录相对解析，并需位于该目录下（与 `ca/cert/key` 规则一致）。
 - `tls-crypt-v2` 需提供 client key（`-----BEGIN OpenVPN tls-crypt-v2 client key-----`）。
 
+### 3.5 NCP / data channel cipher 协商（重要）
+
+OpenVPN 2.5+ 可能会在 `PUSH_REPLY` 中推送 `cipher ...`（NCP / data-ciphers 的协商结果），其值可能与 `.ovpn` 里的 `cipher ...` 不同。
+例如：配置里是 `AES-256-CBC`，但服务端 push 为 `AES-256-GCM`。
+
+如果客户端仍按 `.ovpn` 的 `cipher` 初始化 data channel，就会出现典型症状：
+
+- TLS 握手成功、拿到 Tunnel IP/GW，但 TCP/UDP 业务流量全部超时
+- 日志出现 `error decrypting: cannot decrypt: cannot decode: too short (...)`（常见原因是把 AEAD(GCM) 数据包按 CBC+HMAC 去解析）
+
+当前实现：minivpn 收到 `PUSH_REPLY` 后会优先采用服务端推送的 `cipher`（若在 `SupportedCiphers` 内），并在首把 data key 到达后再初始化 data channel，确保加解密路径与服务端一致。
+`.ovpn` 中的 `cipher` 作为 fallback（服务端不推送 cipher 或推送不支持时）。
+
 ## 4. 开发建议（推荐工作流）
 
 ### 4.1 只改 mihomo（不动 minivpn）
@@ -110,3 +123,11 @@ git push
 - `MIHOMO_OPENVPN_LOG_FIRST=200`
 - `MIHOMO_OPENVPN_LOG_EVERY=100`
 - `MIHOMO_OPENVPN_LOG_STATS=1`
+
+minivpn 侧（更底层的 wire/packet/HMAC 排查）：
+
+- `MINIVPN_DEBUG_WIRE=1`：打印收发原始包
+- `MINIVPN_DEBUG_PACKET=1`：打印 packet marshal/parse 关键字段
+- `MINIVPN_DEBUG_HMAC=1`：打印 tls-auth HMAC 的输入与校验结果
+- `MINIVPN_DEBUG_KEY=1`：打印 tls-auth key 的分块与选取结果
+- `MINIVPN_DEBUG_ALL=1`：打开所有 minivpn debug 开关
