@@ -28,3 +28,4 @@ test/config/cache*
 .gocache/
 .vscode/
 .fleet/
+.claude/settings.local.json

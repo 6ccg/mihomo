@@ -10,12 +10,14 @@ import (
 	"sync"
 	"time"
 
+	apexlog "github.com/apex/log"
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/proxydialer"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
+	mihomolog "github.com/metacubex/mihomo/log"
 
 	M "github.com/metacubex/sing/common/metadata"
 
@@ -135,6 +137,9 @@ func (o *OpenVPN) init(ctx context.Context) error {
 		o.initErr = errors.New("openvpn requires build tag with_gvisor")
 		return o.initErr
 	}
+	if mihomolog.Level() == mihomolog.DEBUG {
+		apexlog.SetLevel(apexlog.DebugLevel)
+	}
 
 	baseDialer := dialer.NewDialer(o.DialOptions()...)
 	var underlyingDialer C.Dialer = baseDialer
@@ -153,7 +158,8 @@ func (o *OpenVPN) init(ctx context.Context) error {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	initCtx := context.WithoutCancel(ctx)
+	ctx, cancel := context.WithTimeout(initCtx, timeout)
 	defer cancel()
 	tun, err := minitunnel.Start(ctx, underlyingDialer, vpnCfg)
 	if err != nil {
