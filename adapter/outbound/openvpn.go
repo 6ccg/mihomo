@@ -163,15 +163,18 @@ func (o *OpenVPN) init(ctx context.Context) error {
 	defer cancel()
 	tun, err := minitunnel.Start(ctx, underlyingDialer, vpnCfg)
 	if err != nil {
-		o.initErr = err
-		return o.initErr
+		// !!! do not set initErr here !!!
+		// let us can retry connection in next time (e.g. DNS resolution failure)
+		return err
 	}
 	o.tun = tun
 
 	localPrefixes, err := localPrefixesFromTUN(tun)
 	if err != nil {
-		o.initErr = err
-		return o.initErr
+		// TUN started but failed to get prefixes, cleanup and allow retry
+		_ = tun.Close()
+		o.tun = nil
+		return err
 	}
 
 	has4, has6 := false, false
@@ -201,10 +204,14 @@ func (o *OpenVPN) init(ctx context.Context) error {
 	}
 	device, err := newOpenVPNStackDevice(tun, localPrefixes, uint32(mtu))
 	if err != nil {
+		_ = tun.Close()
+		o.tun = nil
 		o.initErr = err
 		return o.initErr
 	}
 	if err := device.Start(); err != nil {
+		_ = tun.Close()
+		o.tun = nil
 		o.initErr = err
 		return o.initErr
 	}
@@ -320,9 +327,11 @@ func (o *OpenVPN) Close() error {
 	defer o.initMutex.Unlock()
 	if o.device != nil {
 		_ = o.device.Close()
+		o.device = nil
 	}
 	if o.tun != nil {
 		_ = o.tun.Close()
+		o.tun = nil
 	}
 	return nil
 }

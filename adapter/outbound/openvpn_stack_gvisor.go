@@ -22,8 +22,8 @@ import (
 
 	"github.com/metacubex/gvisor/pkg/buffer"
 	"github.com/metacubex/gvisor/pkg/tcpip"
-	"github.com/metacubex/gvisor/pkg/tcpip/checksum"
 	"github.com/metacubex/gvisor/pkg/tcpip/adapters/gonet"
+	"github.com/metacubex/gvisor/pkg/tcpip/checksum"
 	"github.com/metacubex/gvisor/pkg/tcpip/header"
 	"github.com/metacubex/gvisor/pkg/tcpip/network/ipv4"
 	"github.com/metacubex/gvisor/pkg/tcpip/network/ipv6"
@@ -35,6 +35,14 @@ import (
 )
 
 const defaultOVPNNIC tcpip.NICID = 1
+
+// writePayloadPool is used to reduce GC pressure in writeLoop by reusing payload buffers.
+var writePayloadPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 1<<16) // 64KB max MTU
+		return &buf
+	},
+}
 
 var (
 	openvpnPacketLogAll   bool
@@ -81,7 +89,7 @@ func newOpenVPNStackDevice(tun *minitunnel.TUN, localAddresses []netip.Prefix, m
 	device := &openvpnStackDevice{
 		stack:    ipStack,
 		mtu:      mtu,
-		outbound: make(chan *stack.PacketBuffer, 256),
+		outbound: make(chan *stack.PacketBuffer, 1024), // Increased from 256 for better throughput
 		done:     make(chan struct{}),
 		tun:      tun,
 	}
@@ -117,17 +125,6 @@ func newOpenVPNStackDevice(tun *minitunnel.TUN, localAddresses []netip.Prefix, m
 	}
 	ipStack.SetRouteTable(routes)
 
-	bufSize := 20 * 1024
-	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPReceiveBufferSizeRangeOption{
-		Min:     1,
-		Default: bufSize,
-		Max:     bufSize,
-	})
-	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPSendBufferSizeRangeOption{
-		Min:     1,
-		Default: bufSize,
-		Max:     bufSize,
-	})
 	sOpt := tcpip.TCPSACKEnabled(true)
 	ipStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sOpt)
 	mOpt := tcpip.TCPModerateReceiveBufferOption(true)
@@ -185,12 +182,14 @@ func (d *openvpnStackDevice) ListenPacket(ctx context.Context, destination M.Soc
 func (d *openvpnStackDevice) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.done)
-		close(d.outbound)
-		d.stack.Close()
-		for _, endpoint := range d.stack.CleanupEndpoints() {
-			endpoint.Abort()
+		if d.stack != nil {
+			d.stack.Close()
+			for _, endpoint := range d.stack.CleanupEndpoints() {
+				endpoint.Abort()
+			}
+			d.stack.Wait()
 		}
-		d.stack.Wait()
+		close(d.outbound)
 	})
 	return nil
 }
@@ -216,12 +215,11 @@ func (d *openvpnStackDevice) readLoop() {
 		if n == 0 {
 			continue
 		}
-		data := make([]byte, n)
-		copy(data, buf[:n])
+		payload := buf[:n]
 		inCount := atomic.AddUint64(&d.inPackets, 1)
-		d.logPacket("tun->stack", data, inCount)
+		d.logPacket("tun->stack", payload, inCount)
 		var networkProtocol tcpip.NetworkProtocolNumber
-		switch header.IPVersion(data) {
+		switch header.IPVersion(payload) {
 		case header.IPv4Version:
 			networkProtocol = header.IPv4ProtocolNumber
 		case header.IPv6Version:
@@ -229,8 +227,10 @@ func (d *openvpnStackDevice) readLoop() {
 		default:
 			continue
 		}
+		v := buffer.NewView(n)
+		v.Write(payload)
 		packetBuffer := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buffer.MakeWithData(data),
+			Payload: buffer.MakeWithView(v),
 		})
 		d.dispatcher.DeliverNetworkPacket(networkProtocol, packetBuffer)
 		packetBuffer.DecRef()
@@ -239,37 +239,54 @@ func (d *openvpnStackDevice) readLoop() {
 }
 
 func (d *openvpnStackDevice) writeLoop() {
-	for {
+	for packetBuffer := range d.outbound {
 		select {
 		case <-d.done:
-			return
-		case packetBuffer, ok := <-d.outbound:
-			if !ok {
+			packetBuffer.DecRef()
+			continue
+		default:
+		}
+
+		payloadLen := packetBuffer.Size()
+		// Use pooled buffer to reduce GC pressure
+		bufPtr := writePayloadPool.Get().(*[]byte)
+		payload := (*bufPtr)[:payloadLen]
+
+		views, viewOffset := packetBuffer.AsViewList()
+		written := 0
+		skip := viewOffset
+		for v := views.Front(); v != nil && written < payloadLen; v = v.Next() {
+			s := v.AsSlice()
+			if skip >= len(s) {
+				skip -= len(s)
+				continue
+			}
+			s = s[skip:]
+			skip = 0
+			written += copy(payload[written:], s)
+		}
+		packetBuffer.DecRef()
+		outCount := atomic.AddUint64(&d.outPackets, 1)
+		d.logPacket("stack->tun", payload, outCount)
+
+		select {
+		case <-d.done:
+			writePayloadPool.Put(bufPtr)
+			continue
+		default:
+		}
+
+		_, err := d.tun.Write(payload)
+		writePayloadPool.Put(bufPtr)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
 				return
 			}
-			total := 0
-			for _, slice := range packetBuffer.AsSlices() {
-				total += len(slice)
+			if mihomolog.Level() == mihomolog.DEBUG {
+				mihomolog.Debugln("[OpenVPN] tun.Write error: %v", err)
 			}
-			payload := make([]byte, total)
-			offset := 0
-			for _, slice := range packetBuffer.AsSlices() {
-				offset += copy(payload[offset:], slice)
-			}
-			packetBuffer.DecRef()
-			outCount := atomic.AddUint64(&d.outPackets, 1)
-			d.logPacket("stack->tun", payload, outCount)
-			_, err := d.tun.Write(payload)
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
-					return
-				}
-				if mihomolog.Level() == mihomolog.DEBUG {
-					mihomolog.Debugln("[OpenVPN] tun.Write error: %v", err)
-				}
-			}
-			d.logStats("stack->tun", outCount)
 		}
+		d.logStats("stack->tun", outCount)
 	}
 }
 
@@ -553,15 +570,24 @@ func (ep *openvpnEndpoint) ParseHeader(ptr *stack.PacketBuffer) bool {
 }
 
 func (ep *openvpnEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) {
+	select {
+	case <-ep.done:
+		return 0, &tcpip.ErrClosedForSend{}
+	default:
+	}
+
+	written := 0
 	for _, packetBuffer := range list.AsSlice() {
 		packetBuffer.IncRef()
 		select {
 		case <-ep.done:
-			return 0, &tcpip.ErrClosedForSend{}
+			packetBuffer.DecRef()
+			return written, &tcpip.ErrClosedForSend{}
 		case ep.outbound <- packetBuffer:
+			written++
 		}
 	}
-	return list.Len(), nil
+	return written, nil
 }
 
 func (ep *openvpnEndpoint) Close() {
