@@ -960,6 +960,36 @@ proxies: # socks5
     #   j3: <t><b 0xf6ab><c><r 10>                        # AmneziaWG v1.5 only (removed in v2)
     #   itime: 60                                         # AmneziaWG v1.5 only (removed in v2)
 
+  # openvpn
+  - name: "ovpn"
+    type: openvpn
+    server: vpn.example.com
+    port: 1194
+    proto: udp  # udp, tcp, udp4, tcp4, udp6, tcp6
+    username: user
+    password: pass
+    ca: |
+      -----BEGIN CERTIFICATE-----
+      MIIDQzCCAqygAwIBAgIJAOvAQDdHv...
+      -----END CERTIFICATE-----
+    # cert: |
+    #   -----BEGIN CERTIFICATE-----
+    #   ...
+    #   -----END CERTIFICATE-----
+    # key: |
+    #   -----BEGIN PRIVATE KEY-----
+    #   ...
+    #   -----END PRIVATE KEY-----
+    # tls-auth: |
+    #   -----BEGIN OpenVPN Static key V1-----
+    #   ...
+    #   -----END OpenVPN Static key V1-----
+    # key-direction: 1
+    # cipher: AES-256-GCM
+    # auth: SHA256
+    # timeout: 60
+    # dialer-proxy: "ss1"
+
   # tuic
   - name: tuic
     server: www.example.com

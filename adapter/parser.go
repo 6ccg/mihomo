@@ -96,6 +96,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewHysteria2(*hyOption)
+	case "openvpn":
+		ovpnOption := &outbound.OpenVPNOption{}
+		err = decoder.Decode(mapping, ovpnOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewOpenVPN(*ovpnOption)
 	case "wireguard":
 		wgOption := &outbound.WireGuardOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, wgOption)

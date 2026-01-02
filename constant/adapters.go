@@ -40,6 +40,7 @@ const (
 	Hysteria
 	Hysteria2
 	WireGuard
+	OpenVPN
 	Tuic
 	Ssh
 	Mieru
@@ -202,6 +203,8 @@ func (at AdapterType) String() string {
 		return "Hysteria2"
 	case WireGuard:
 		return "WireGuard"
+	case OpenVPN:
+		return "OpenVPN"
 	case Tuic:
 		return "Tuic"
 	case Ssh:
